@@ -211,7 +211,7 @@ impl<W: TextWrite> RenderNode<W> for HighlightingHtmlRenderer<W> {
                 }
                 BlockText::Owned(s) => code.push_str(s),
             }
-            let lang = kd.language(source).unwrap_or("plaintext");
+            let lang = kd.language_str(source).unwrap_or("plaintext");
             match self.options.mode {
                 HighlightingMode::Attribute => {
                     if let Some(html) =
@@ -230,7 +230,7 @@ impl<W: TextWrite> RenderNode<W> for HighlightingHtmlRenderer<W> {
             }
 
             self.writer.write_safe_str(w, "<pre><code")?;
-            if let Some(lang) = kd.language(source) {
+            if let Some(lang) = kd.language_str(source) {
                 self.writer.write_safe_str(w, " class=\"language-")?;
                 self.writer.write(w, lang)?;
                 self.writer.write_safe_str(w, "\"")?;
