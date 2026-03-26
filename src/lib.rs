@@ -1,9 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use rushdown::as_kind_data;
-use rushdown::as_type_data;
 use rushdown::ast::Arena;
-use rushdown::ast::BlockText;
 use rushdown::ast::CodeBlock;
 use rushdown::ast::NodeRef;
 use rushdown::ast::WalkStatus;
@@ -201,15 +199,9 @@ impl<W: TextWrite> RenderNode<W> for HighlightingHtmlRenderer<W> {
     ) -> Result<WalkStatus> {
         if entering {
             let kd = as_kind_data!(arena, node_ref, CodeBlock);
-            let block = as_type_data!(arena, node_ref, Block);
             let mut code = String::new();
-            match kd.value() {
-                BlockText::Source => {
-                    for line in block.source().iter() {
-                        code.push_str(&line.str(source));
-                    }
-                }
-                BlockText::Owned(s) => code.push_str(s),
+            for line in kd.value().iter(source) {
+                code.push_str(&line);
             }
             let lang = kd.language_str(source).unwrap_or("plaintext");
             match self.options.mode {
@@ -236,17 +228,9 @@ impl<W: TextWrite> RenderNode<W> for HighlightingHtmlRenderer<W> {
                 self.writer.write_safe_str(w, "\"")?;
             }
             self.writer.write_safe_str(w, ">")?;
-            match kd.value() {
-                BlockText::Source => {
-                    for line in block.source().iter() {
-                        self.writer.raw_write(w, &line.str(source))?;
-                    }
-                }
-                BlockText::Owned(s) => {
-                    self.writer.raw_write(w, s)?;
-                }
+            for line in kd.value().iter(source) {
+                self.writer.raw_write(w, &line)?;
             }
-
             self.writer.write_safe_str(w, "</code></pre>\n")?;
         }
         Ok(WalkStatus::Continue)
