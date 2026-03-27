@@ -1,6 +1,6 @@
 [package]
 name = "rushdown-highlighting"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2021"
 rust-version = "1.87"
 description = "Syntax -highlighting extension for rushdown markdown parser"
@@ -26,5 +26,5 @@ default = ["std"]
 std = ["rushdown/default"]
 
 [dependencies]
-rushdown = { version = "0.13.0", default-features = false}
+rushdown = { version = "0.14.0", default-features = false}
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"]}
