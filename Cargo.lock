@@ -275,9 +275,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rushdown"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0d62648e0634c3b8c90ef0654ab81b0d28274c71c007b67a6073a68b68eef48"
+checksum = "3585cba5a0da7ccf773b91ab9838abbf92c74353ab07b2000af29dcfd66f1083"
 dependencies = [
  "bitflags",
  "memchr",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "rushdown-highlighting"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "rushdown",
  "syntect",
