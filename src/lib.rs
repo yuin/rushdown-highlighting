@@ -1,38 +1,38 @@
 #![doc = include_str!("../README.md")]
 
-use rushdown::as_kind_data;
-use rushdown::ast::Arena;
-use rushdown::ast::CodeBlock;
-use rushdown::ast::NodeRef;
-use rushdown::ast::WalkStatus;
-use rushdown::renderer;
-use rushdown::renderer::html;
-use rushdown::renderer::html::Renderer;
-use rushdown::renderer::html::RendererExtension;
-use rushdown::renderer::html::RendererExtensionFn;
-use rushdown::renderer::BoxRenderNode;
-use rushdown::renderer::NodeRenderer;
-use rushdown::renderer::NodeRendererRegistry;
-use rushdown::renderer::RenderNode;
-use rushdown::renderer::RendererOptions;
-use rushdown::renderer::TextWrite;
-use rushdown::Result;
-use std::any::TypeId;
+use core::any::TypeId;
+use core::fmt;
+use core::marker::PhantomData;
 use std::rc::Rc;
+
+use rushdown::{
+    as_kind_data,
+    ast::{Arena, CodeBlock, CodeBlockKind, NodeRef, WalkStatus},
+    renderer::{
+        self,
+        html::{self, renderer_extension, RendererExtension},
+        BoxRenderNodeDecorator, NextRenderNode, NodeRenderer, NodeRendererRegistry,
+        RenderNodeDecorator, RendererOptions, TextWrite,
+    },
+    Result,
+};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::{Theme, ThemeSet};
 use syntect::html::css_for_theme_with_class_style;
 use syntect::html::styled_line_to_highlighted_html;
 use syntect::html::ClassStyle;
 use syntect::html::ClassedHTMLGenerator;
 use syntect::html::IncludeBackground;
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 // Renderer {{{
 
+/// A function that decides whether a code block should be excluded from highlighting.
+pub type ExcludeFn = Rc<dyn Fn(&CodeBlock, &str, &renderer::Context) -> bool>;
+
 /// Options for the `HighlightingHtmlRenderer`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HighlightingHtmlRendererOptions {
     /// The name of the syntax highlighting theme to use.
     /// This value is only used if the `mode` is set to `HighlightingMode::Attribute`. If the theme
@@ -45,6 +45,14 @@ pub struct HighlightingHtmlRendererOptions {
     /// An optional `ThemeSet` to use for syntax highlighting. If not provided, the default themes
     /// will be used.
     pub theme_set: Option<Rc<ThemeSet>>,
+
+    /// An optional function that decides whether a code block should be excluded from
+    /// highlighting. Excluded code blocks are rendered by the default renderer.
+    pub exclude_fn: Option<ExcludeFn>,
+
+    /// Languages to be excluded from highlighting. Excluded code blocks are rendered by the
+    /// default renderer.
+    pub exclude_languages: &'static [&'static str],
 }
 
 impl Default for HighlightingHtmlRendererOptions {
@@ -53,7 +61,21 @@ impl Default for HighlightingHtmlRendererOptions {
             theme: "InspiredGitHub",
             mode: HighlightingMode::default(),
             theme_set: None,
+            exclude_fn: None,
+            exclude_languages: &[],
         }
+    }
+}
+
+impl fmt::Debug for HighlightingHtmlRendererOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HighlightingHtmlRendererOptions")
+            .field("theme", &self.theme)
+            .field("mode", &self.mode)
+            .field("theme_set", &self.theme_set)
+            .field("exclude_fn", &self.exclude_fn.is_some())
+            .field("exclude_languages", &self.exclude_languages)
+            .finish()
     }
 }
 
@@ -80,160 +102,144 @@ pub fn generate_css(theme: &str, theme_set: Option<&ThemeSet>) -> Option<String>
 
 impl RendererOptions for HighlightingHtmlRendererOptions {}
 
-#[allow(dead_code)]
 struct HighlightingHtmlRenderer<W: TextWrite> {
-    _phantom: core::marker::PhantomData<W>,
-    writer: html::Writer,
+    _phantom: PhantomData<W>,
     options: HighlightingHtmlRendererOptions,
     syntax_set: SyntaxSet,
-    default_theme_set: ThemeSet,
+    theme_set: Rc<ThemeSet>,
 }
 
 impl<W: TextWrite> HighlightingHtmlRenderer<W> {
-    fn with_options(options: HighlightingHtmlRendererOptions, html_opts: html::Options) -> Self {
+    fn with_options(options: HighlightingHtmlRendererOptions) -> Self {
+        let theme_set = options
+            .theme_set
+            .clone()
+            .unwrap_or_else(|| Rc::new(ThemeSet::load_defaults()));
         Self {
-            _phantom: core::marker::PhantomData,
-            writer: html::Writer::with_options(html_opts),
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            default_theme_set: ThemeSet::load_defaults(),
+            _phantom: PhantomData,
             options,
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set,
         }
     }
 
-    fn render_code_to_html_attr(
-        &self,
-        language: &str,
-        code: &str,
-        theme_name: &str,
-    ) -> Option<String> {
-        let ps = &self.syntax_set;
-        let ts = if let Some(ref theme_set) = self.options.theme_set {
-            theme_set
-        } else {
-            &self.default_theme_set
-        };
+    fn syntax(&self, language: &str) -> Option<&SyntaxReference> {
+        self.syntax_set
+            .find_syntax_by_token(language)
+            .or_else(|| self.syntax_set.find_syntax_by_extension(language))
+    }
 
-        let theme = ts
+    fn theme(&self) -> &Theme {
+        self.theme_set
             .themes
-            .get(theme_name)
-            .unwrap_or_else(|| &ts.themes["InspiredGitHub"]);
+            .get(self.options.theme)
+            .unwrap_or_else(|| &self.theme_set.themes["InspiredGitHub"])
+    }
 
-        let lang = if language.is_empty() {
-            "plaintext"
-        } else {
-            language
-        };
-        let syntax = ps
-            .find_syntax_by_token(lang)
-            .or_else(|| ps.find_syntax_by_extension(lang))
-            .unwrap_or_else(|| ps.find_syntax_plain_text());
-
-        let bg = theme
+    fn background_color(&self) -> String {
+        self.theme()
             .settings
             .background
             .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
-            .unwrap_or_else(|| "#ffffff".to_string());
-
-        let mut out = String::new();
-        out.push_str(&format!(
-        r#"<pre style="background-color: {}; padding: 12px; overflow: auto;"><code class="language-{}">"#,
-        bg, language
-    ));
-
-        let mut h = HighlightLines::new(syntax, theme);
-
-        for line in LinesWithEndings::from(code) {
-            let regions = h.highlight_line(line, ps).ok()?;
-            let html_line =
-                styled_line_to_highlighted_html(&regions[..], IncludeBackground::No).ok()?;
-            out.push_str(&html_line);
-        }
-
-        out.push_str("</code></pre>\n");
-        Some(out)
+            .unwrap_or_else(|| "#ffffff".to_string())
     }
 
-    fn render_with_classes(&self, language: &str, code: &str) -> Option<String> {
-        let ps = &self.syntax_set;
-
-        let lang = if language.is_empty() {
-            "plaintext"
-        } else {
-            language
-        };
-
-        let syntax = ps
-            .find_syntax_by_token(lang)
-            .or_else(|| ps.find_syntax_by_extension(lang))
-            .unwrap_or_else(|| ps.find_syntax_plain_text());
-
-        let mut html_gen =
-            ClassedHTMLGenerator::new_with_class_style(syntax, ps, ClassStyle::Spaced);
-
-        let mut html = String::new();
-        html.push_str(&format!(
-            r#"<pre class="code"><code class="language-{}">"#,
-            language
-        ));
+    fn highlight_attribute(&self, syntax: &SyntaxReference, code: &str) -> String {
+        let mut out = String::new();
+        let mut highlighter = HighlightLines::new(syntax, self.theme());
         for line in LinesWithEndings::from(code) {
-            html_gen
-                .parse_html_for_line_which_includes_newline(line)
-                .ok()?;
+            if let Ok(regions) = highlighter.highlight_line(line, &self.syntax_set) {
+                if let Ok(html) =
+                    styled_line_to_highlighted_html(&regions[..], IncludeBackground::No)
+                {
+                    out.push_str(&html);
+                }
+            }
         }
-        html.push_str(&html_gen.finalize());
-        html.push_str("</code></pre>\n");
-        Some(html)
+        out
+    }
+
+    fn highlight_class(&self, syntax: &SyntaxReference, code: &str) -> String {
+        let mut generator = ClassedHTMLGenerator::new_with_class_style(
+            syntax,
+            &self.syntax_set,
+            ClassStyle::Spaced,
+        );
+        for line in LinesWithEndings::from(code) {
+            let _ = generator.parse_html_for_line_which_includes_newline(line);
+        }
+        generator.finalize()
+    }
+
+    fn render_highlighted(
+        &self,
+        w: &mut W,
+        source: &str,
+        kd: &CodeBlock,
+        lang: &str,
+        syntax: &SyntaxReference,
+    ) -> Result<()> {
+        let mut code = String::new();
+        for line in kd.value().iter(source) {
+            code.push_str(&line);
+        }
+        match self.options.mode {
+            HighlightingMode::Attribute => {
+                w.write_str("<pre style=\"background-color: ")?;
+                w.write_str(&self.background_color())?;
+                w.write_str("; padding: 12px; overflow: auto;\"><code class=\"language-")?;
+                html::write_text(w, lang)?;
+                w.write_str("\">")?;
+                w.write_str(&self.highlight_attribute(syntax, &code))?;
+            }
+            HighlightingMode::Class => {
+                w.write_str("<pre class=\"code\"><code class=\"language-")?;
+                html::write_text(w, lang)?;
+                w.write_str("\">")?;
+                w.write_str(&self.highlight_class(syntax, &code))?;
+            }
+        }
+        w.write_str("</code></pre>\n")
     }
 }
 
-impl<W: TextWrite> RenderNode<W> for HighlightingHtmlRenderer<W> {
-    /// Renders a paragraph node.
-    fn render_node<'a>(
+impl<W: TextWrite> RenderNodeDecorator<W> for HighlightingHtmlRenderer<W> {
+    fn decorate_node<'a>(
         &self,
+        next: &NextRenderNode<'_, W>,
         w: &mut W,
         source: &'a str,
         arena: &'a Arena,
         node_ref: NodeRef,
         entering: bool,
-        _ctx: &mut renderer::Context,
+        context: &mut renderer::Context,
     ) -> Result<WalkStatus> {
-        if entering {
-            let kd = as_kind_data!(arena, node_ref, CodeBlock);
-            let mut code = String::new();
-            for line in kd.value().iter(source) {
-                code.push_str(&line);
-            }
-            let lang = kd.language_str(source).unwrap_or("plaintext");
-            match self.options.mode {
-                HighlightingMode::Attribute => {
-                    if let Some(html) =
-                        self.render_code_to_html_attr(lang, &code, self.options.theme)
-                    {
-                        w.write_str(&html)?;
-                        return Ok(WalkStatus::Continue);
-                    }
-                }
-                HighlightingMode::Class => {
-                    if let Some(html) = self.render_with_classes(lang, &code) {
-                        w.write_str(&html)?;
-                        return Ok(WalkStatus::Continue);
-                    }
-                }
-            }
-
-            self.writer.write_safe_str(w, "<pre><code")?;
-            if let Some(lang) = kd.language_str(source) {
-                self.writer.write_safe_str(w, " class=\"language-")?;
-                self.writer.write(w, lang)?;
-                self.writer.write_safe_str(w, "\"")?;
-            }
-            self.writer.write_safe_str(w, ">")?;
-            for line in kd.value().iter(source) {
-                self.writer.raw_write(w, &line)?;
-            }
-            self.writer.write_safe_str(w, "</code></pre>\n")?;
+        let kd = as_kind_data!(arena, node_ref, CodeBlock);
+        let lang = kd.language(source);
+        let lang = lang.str(source);
+        let lang = lang.as_ref();
+        let excluded = self
+            .options
+            .exclude_fn
+            .as_ref()
+            .is_some_and(|f| f(kd, source, context))
+            || self.options.exclude_languages.contains(&lang);
+        if excluded {
+            return next.render_node(w, source, arena, node_ref, entering, context);
         }
-        Ok(WalkStatus::Continue)
+        let syntax = if kd.code_block_kind() == CodeBlockKind::Fenced && !lang.is_empty() {
+            self.syntax(lang)
+        } else {
+            None
+        };
+        let Some(syntax) = syntax else {
+            return next.render_node(w, source, arena, node_ref, entering, context);
+        };
+        if !entering {
+            return Ok(WalkStatus::Continue);
+        }
+        self.render_highlighted(w, source, kd, lang, syntax)?;
+        Ok(WalkStatus::SkipChildren)
     }
 }
 
@@ -242,7 +248,10 @@ where
     W: TextWrite + 'r,
 {
     fn register_node_renderer_fn(self, nrr: &mut impl NodeRendererRegistry<'r, W>) {
-        nrr.register_node_renderer_fn(TypeId::of::<CodeBlock>(), BoxRenderNode::new(self));
+        nrr.register_node_renderer_decorator_fn(
+            TypeId::of::<CodeBlock>(),
+            BoxRenderNodeDecorator::new(self),
+        );
     }
 }
 
@@ -258,8 +267,8 @@ pub fn highlighting_html_renderer_extension<'cb, W>(
 where
     W: TextWrite + 'cb,
 {
-    RendererExtensionFn::new(move |r: &mut Renderer<'cb, W>| {
-        let options = options.into();
+    let options = options.into();
+    renderer_extension(move |r| {
         r.add_node_renderer(HighlightingHtmlRenderer::with_options, options);
     })
 }
